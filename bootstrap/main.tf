@@ -36,16 +36,21 @@ resource "google_storage_bucket" "tf_state" {
 # ---------------------------------------------------------------------------
 # 2. Workload Identity Federation for GitHub Actions (no JSON keys)
 # ---------------------------------------------------------------------------
+# NOTE: pool/provider IDs carry a "-v2" suffix because the original names
+# (github-actions-pool / github-actions-provider) were already created in
+# this GCP project by an earlier partial `apply` that failed part-way
+# through. Renaming here avoids the 409 "already exists" conflict without
+# needing to `terraform import` the orphaned resources.
 resource "google_iam_workload_identity_pool" "github" {
   project                   = var.project_id
-  workload_identity_pool_id = "github-actions-pool"
-  display_name               = "GitHub Actions Pool"
+  workload_identity_pool_id = "github-actions-pool-v2"
+  display_name              = "GitHub Actions Pool"
 }
 
 resource "google_iam_workload_identity_pool_provider" "github" {
   project                            = var.project_id
   workload_identity_pool_id          = google_iam_workload_identity_pool.github.workload_identity_pool_id
-  workload_identity_pool_provider_id = "github-actions-provider"
+  workload_identity_pool_provider_id = "github-actions-provider-v2"
   display_name                       = "GitHub Actions OIDC"
 
   attribute_mapping = {
@@ -76,8 +81,8 @@ resource "google_service_account" "github_actions" {
 # the credential GitHub Actions actually uses.
 resource "google_service_account_iam_member" "wif_binding" {
   service_account_id = google_service_account.github_actions.name
-  role                = "roles/iam.workloadIdentityUser"
-  member              = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository/${var.github_repo}"
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository/${var.github_repo}"
 }
 
 # Minimum roles the CI service account needs to plan/apply this project.

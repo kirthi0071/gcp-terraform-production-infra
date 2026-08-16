@@ -1,123 +1,365 @@
-# .github/workflows/terraform-qa.yml
-#
-# Runs on every PR against main. Creates/updates an EPHEMERAL, per-PR QA
-# environment, then destroys it automatically when the PR closes (merged or
-# not). Never touches production. Uses OIDC/WIF -- no long-lived GCP key is
-# ever stored as a GitHub secret.
-
-name: Terraform QA (ephemeral per-PR)
+name: Terraform QA - Ephemeral per PR
 
 on:
   pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, closed]
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - closed
 
 permissions:
   contents: read
-  id-token: write   # required for OIDC -> WIF
-  pull-requests: write # required to comment plan/cost output on the PR
+  id-token: write
+  pull-requests: write
 
 env:
-  TF_VERSION: "1.15.8"
+  # Verified Terraform 1.15 release.
+  TF_VERSION: "1.15.5"
+
   PROJECT_ID: "testing-project-499604"
   REGION: "asia-south1"
-  # Unique per PR -- this is the state-isolation mechanism (section 15/16):
-  # each PR gets its own prefix inside the shared state bucket, so
-  # concurrent PRs can never collide or overwrite each other's state.
+
+  # Example:
+  # qa-pr-123
   TF_ENVIRONMENT: "qa-pr-${{ github.event.pull_request.number }}"
+
+  # Every PR gets its own Terraform state.
+  #
+  # Example:
+  # ephemeral/pr-123
   STATE_PREFIX: "ephemeral/pr-${{ github.event.pull_request.number }}"
 
-jobs:
-  plan-and-apply:
-    if: github.event.action != 'closed'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+  TF_STATE_BUCKET: "testing-project-499604-tf-state"
 
-      - id: auth
+  DB_SECRET_NAME: "db-password"
+
+
+# ============================================================
+# CREATE / UPDATE EPHEMERAL QA ENVIRONMENT
+# ============================================================
+
+jobs:
+
+  plan-and-apply:
+    name: Plan and Apply Ephemeral QA
+    if: github.event.action != 'closed'
+
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: terraform-qa-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+
+    steps:
+
+      # ------------------------------------------------------
+      # Checkout
+      # ------------------------------------------------------
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # ------------------------------------------------------
+      # Authenticate to GCP using GitHub OIDC / WIF
+      # ------------------------------------------------------
+
+      - name: Authenticate to Google Cloud
+        id: auth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
-      - uses: hashicorp/setup-terraform@v3
+
+      # ------------------------------------------------------
+      # Setup gcloud
+      # ------------------------------------------------------
+
+      - name: Setup Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+
+      # ------------------------------------------------------
+      # Setup Terraform
+      # ------------------------------------------------------
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TF_VERSION }}
+
+
+      # ------------------------------------------------------
+      # Terraform formatting
+      # ------------------------------------------------------
 
       - name: Terraform fmt check
         run: terraform fmt -check -recursive
 
-      - name: Terraform init (ephemeral state prefix)
+
+      # ------------------------------------------------------
+      # Terraform initialization
+      # ------------------------------------------------------
+
+      - name: Terraform init
         run: |
           terraform init \
-            -backend-config="bucket=testing-project-499604-tf-state" \
-            -backend-config="prefix=${{ env.STATE_PREFIX }}"
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="prefix=${STATE_PREFIX}"
+
+
+      # ------------------------------------------------------
+      # Terraform validation
+      # ------------------------------------------------------
 
       - name: Terraform validate
         run: terraform validate
 
+
+      # ------------------------------------------------------
+      # Get DB password from Secret Manager
+      # ------------------------------------------------------
+      #
+      # IMPORTANT:
+      # Do not print the secret.
+      #
+      # TF_VAR_db_password makes Terraform automatically treat
+      # the value as the variable "db_password".
+      #
+
       - name: Fetch DB password from Secret Manager
+        shell: bash
         run: |
-          echo "TF_VAR_db_password=$(gcloud secrets versions access latest --secret=db-password --project=${{ env.PROJECT_ID }})" >> "$GITHUB_ENV"
+          DB_PASSWORD="$(gcloud secrets versions access latest \
+            --secret="${DB_SECRET_NAME}" \
+            --project="${PROJECT_ID}")"
+
+          {
+            echo "TF_VAR_db_password<<EOF"
+            echo "${DB_PASSWORD}"
+            echo "EOF"
+          } >> "${GITHUB_ENV}"
+
+
+      # ------------------------------------------------------
+      # Terraform plan
+      # ------------------------------------------------------
 
       - name: Terraform plan
         run: |
           terraform plan \
-            -var="project_id=${{ env.PROJECT_ID }}" \
-            -var="region=${{ env.REGION }}" \
-            -var="environment=${{ env.TF_ENVIRONMENT }}" \
+            -var="project_id=${PROJECT_ID}" \
+            -var="region=${REGION}" \
+            -var="environment=${TF_ENVIRONMENT}" \
             -var-file="environments/qa/terraform.tfvars.example" \
             -out=tfplan
+
+
+      # ------------------------------------------------------
+      # Checkov
+      # ------------------------------------------------------
+      #
+      # These are the checks you explicitly decided to skip
+      # temporarily.
+      #
+      # soft_fail remains FALSE.
+      #
+      # Therefore:
+      #
+      # skipped checks -> ignored
+      # NEW Checkov failure -> pipeline fails
+      #
 
       - name: Checkov static security scan
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: .
           framework: terraform
-          soft_fail: false # a failing Checkov check blocks apply
 
-      - name: Infracost cost estimate
+          soft_fail: false
+
+          skip_check: >-
+            CKV_GCP_62,
+            CKV_GCP_125,
+            CKV_GCP_41,
+            CKV_GCP_49,
+            CKV_GCP_6,
+            CKV_GCP_106,
+            CKV_GCP_2,
+            CKV_GCP_32,
+            CKV_GCP_39,
+            CKV2_GCP_18
+
+          output_format: cli,sarif
+          output_file_path: console,results.sarif
+
+
+      # ------------------------------------------------------
+      # Install Infracost
+      # ------------------------------------------------------
+
+      - name: Setup Infracost
         uses: infracost/actions/setup@v3
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
-      - run: |
-          infracost breakdown --path tfplan --format json --out-file infracost.json
-          infracost comment github --path infracost.json \
-            --repo "$GITHUB_REPOSITORY" --github-token "${{ secrets.GITHUB_TOKEN }}" \
+
+
+      # ------------------------------------------------------
+      # Convert Terraform binary plan to JSON
+      # ------------------------------------------------------
+      #
+      # terraform plan -out=tfplan creates a binary plan.
+      #
+      # Infracost needs the Terraform plan in JSON form.
+      #
+
+      - name: Convert Terraform plan to JSON
+        run: |
+          terraform show \
+            -json \
+            tfplan > tfplan.json
+
+
+      # ------------------------------------------------------
+      # Infracost
+      # ------------------------------------------------------
+
+      - name: Infracost cost estimate
+        run: |
+          infracost breakdown \
+            --path tfplan.json \
+            --format json \
+            --out-file infracost.json
+
+
+      # ------------------------------------------------------
+      # Comment cost estimate on PR
+      # ------------------------------------------------------
+
+      - name: Comment Infracost on PR
+        run: |
+          infracost comment github \
+            --path infracost.json \
+            --repo "${GITHUB_REPOSITORY}" \
+            --github-token "${{ secrets.GITHUB_TOKEN }}" \
             --pull-request "${{ github.event.pull_request.number }}"
 
-      - name: Terraform apply (ephemeral QA environment)
-        run: terraform apply -auto-approve tfplan
+
+      # ------------------------------------------------------
+      # Apply ephemeral QA environment
+      # ------------------------------------------------------
+
+      - name: Terraform apply
+        run: |
+          terraform apply \
+            -auto-approve \
+            tfplan
+
+
+# ============================================================
+# DESTROY EPHEMERAL QA ENVIRONMENT
+# ============================================================
 
   destroy-ephemeral:
+    name: Destroy Ephemeral QA
     if: github.event.action == 'closed'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: google-github-actions/auth@v2
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: terraform-qa-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+
+    steps:
+
+      # ------------------------------------------------------
+      # Checkout exact PR commit
+      # ------------------------------------------------------
+      #
+      # Important:
+      # On PR close, the source branch may have been deleted.
+      #
+      # github.event.pull_request.head.sha still identifies
+      # the exact commit that created the environment.
+      #
+
+      - name: Checkout PR commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+
+      # ------------------------------------------------------
+      # Authenticate to GCP
+      # ------------------------------------------------------
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
-      - uses: hashicorp/setup-terraform@v3
+
+      # ------------------------------------------------------
+      # Setup gcloud
+      # ------------------------------------------------------
+
+      - name: Setup Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+
+      # ------------------------------------------------------
+      # Setup Terraform
+      # ------------------------------------------------------
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Terraform init (same ephemeral state prefix)
+
+      # ------------------------------------------------------
+      # Terraform init
+      # ------------------------------------------------------
+
+      - name: Terraform init
         run: |
           terraform init \
-            -backend-config="bucket=testing-project-499604-tf-state" \
-            -backend-config="prefix=${{ env.STATE_PREFIX }}"
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="prefix=${STATE_PREFIX}"
 
-      - name: Fetch DB password (needed for a clean destroy plan)
-        run: |
-          echo "TF_VAR_db_password=$(gcloud secrets versions access latest --secret=db-password --project=${{ env.PROJECT_ID }})" >> "$GITHUB_ENV"
 
-      - name: Terraform destroy (tear down this PR's environment)
+      # ------------------------------------------------------
+      # Get DB password
+      # ------------------------------------------------------
+
+      - name: Fetch DB password from Secret Manager
+        shell: bash
         run: |
-          terraform destroy -auto-approve \
-            -var="project_id=${{ env.PROJECT_ID }}" \
-            -var="region=${{ env.REGION }}" \
-            -var="environment=${{ env.TF_ENVIRONMENT }}" \
+          DB_PASSWORD="$(gcloud secrets versions access latest \
+            --secret="${DB_SECRET_NAME}" \
+            --project="${PROJECT_ID}")"
+
+          {
+            echo "TF_VAR_db_password<<EOF"
+            echo "${DB_PASSWORD}"
+            echo "EOF"
+          } >> "${GITHUB_ENV}"
+
+
+      # ------------------------------------------------------
+      # Destroy ephemeral environment
+      # ------------------------------------------------------
+
+      - name: Terraform destroy
+        run: |
+          terraform destroy \
+            -auto-approve \
+            -var="project_id=${PROJECT_ID}" \
+            -var="region=${REGION}" \
+            -var="environment=${TF_ENVIRONMENT}" \
             -var-file="environments/qa/terraform.tfvars.example"

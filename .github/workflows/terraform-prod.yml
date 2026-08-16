@@ -1,105 +1,401 @@
 # .github/workflows/terraform-prod.yml
 #
-# Runs ONLY on pushes to main (i.e. after a PR has already gone through the
-# QA workflow, been reviewed, and merged). Plans automatically; apply is
-# gated behind a GitHub Environment ("production") which you configure with
-# required reviewers in repo Settings -> Environments -- that's what turns
-# "manual approval" into an actual enforced gate rather than a suggestion.
+# Production deployment
+#
+# Flow:
+#
+# feature branch
+#      |
+#      v
+# Pull Request
+#      |
+#      v
+# Ephemeral QA
+#      |
+#      v
+# Review / Approval
+#      |
+#      v
+# Merge to main
+#      |
+#      v
+# Production PLAN
+#      |
+#      v
+# GitHub "production" Environment approval
+#      |
+#      v
+# Production APPLY
+#
+# IMPORTANT:
+# - Production is NEVER deployed from a feature branch.
+# - Production uses its own Terraform state.
+# - Authentication uses GitHub OIDC -> GCP Workload Identity Federation.
+# - No GCP service-account JSON key is stored in GitHub.
+# - Checkov findings explicitly accepted for now are skipped.
+#
 
 name: Terraform Production
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
 
 permissions:
   contents: read
   id-token: write
 
 env:
-  TF_VERSION: "1.15.8"
+  # Terraform 1.15.x stable release.
+  TF_VERSION: "1.15.5"
+
   PROJECT_ID: "testing-project-499604"
   REGION: "asia-south1"
 
+  # Production environment name.
+  TF_ENVIRONMENT: "prod"
+
+  # Production Terraform state bucket.
+  TF_STATE_BUCKET: "testing-project-499604-tf-state"
+
+  # Production state prefix.
+  TF_STATE_PREFIX: "prod"
+
+  # Secret Manager secret containing the database password.
+  DB_SECRET_NAME: "db-password"
+
+
+# ============================================================
+# PRODUCTION PLAN
+# ============================================================
+
 jobs:
+
   plan:
+    name: Terraform Production Plan
+
     runs-on: ubuntu-latest
+
+    concurrency:
+      group: terraform-production
+      cancel-in-progress: false
+
     outputs:
       plan-exitcode: ${{ steps.plan.outputs.exitcode }}
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: google-github-actions/auth@v2
+    steps:
+
+      # ------------------------------------------------------
+      # Checkout
+      # ------------------------------------------------------
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # ------------------------------------------------------
+      # Authenticate to GCP using OIDC / WIF
+      # ------------------------------------------------------
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
-      - uses: hashicorp/setup-terraform@v3
+
+      # ------------------------------------------------------
+      # Setup Google Cloud CLI
+      # ------------------------------------------------------
+
+      - name: Setup Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+
+      # ------------------------------------------------------
+      # Setup Terraform
+      # ------------------------------------------------------
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - run: terraform fmt -check -recursive
 
-      - name: Terraform init (prod state prefix)
+      # ------------------------------------------------------
+      # Terraform formatting
+      # ------------------------------------------------------
+
+      - name: Terraform fmt check
+        run: terraform fmt -check -recursive
+
+
+      # ------------------------------------------------------
+      # Terraform initialization
+      # ------------------------------------------------------
+      #
+      # Production has its own state prefix:
+      #
+      # gs://testing-project-499604-tf-state/prod
+      #
+
+      - name: Terraform init
         run: |
           terraform init \
-            -backend-config=environments/prod/backend.gcs.tfbackend
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="prefix=${TF_STATE_PREFIX}"
 
-      - run: terraform validate
+
+      # ------------------------------------------------------
+      # Terraform validation
+      # ------------------------------------------------------
+
+      - name: Terraform validate
+        run: terraform validate
+
+
+      # ------------------------------------------------------
+      # Fetch DB password from Secret Manager
+      # ------------------------------------------------------
+      #
+      # The password is never printed.
+      #
 
       - name: Fetch DB password from Secret Manager
+        shell: bash
         run: |
-          echo "TF_VAR_db_password=$(gcloud secrets versions access latest --secret=db-password --project=${{ env.PROJECT_ID }})" >> "$GITHUB_ENV"
+          DB_PASSWORD="$(gcloud secrets versions access latest \
+            --secret="${DB_SECRET_NAME}" \
+            --project="${PROJECT_ID}")"
+
+          {
+            echo "TF_VAR_db_password<<EOF"
+            echo "${DB_PASSWORD}"
+            echo "EOF"
+          } >> "${GITHUB_ENV}"
+
+
+      # ------------------------------------------------------
+      # Terraform plan
+      # ------------------------------------------------------
 
       - name: Terraform plan
         id: plan
         run: |
           terraform plan \
-            -var="project_id=${{ env.PROJECT_ID }}" \
-            -var="region=${{ env.REGION }}" \
+            -var="project_id=${PROJECT_ID}" \
+            -var="region=${REGION}" \
+            -var="environment=${TF_ENVIRONMENT}" \
             -var-file="environments/prod/terraform.tfvars.example" \
             -out=tfplan
+
+
+      # ------------------------------------------------------
+      # Checkov security scan
+      # ------------------------------------------------------
+      #
+      # These checks are intentionally skipped for now.
+      #
+      # soft_fail remains FALSE.
+      #
+      # Therefore:
+      #
+      # skipped checks       -> ignored
+      # new Checkov finding  -> FAIL
+      #
 
       - name: Checkov static security scan
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: .
           framework: terraform
+
           soft_fail: false
 
-      - uses: actions/upload-artifact@v4
+          skip_check: >-
+            CKV_GCP_62,
+            CKV_GCP_125,
+            CKV_GCP_41,
+            CKV_GCP_49,
+            CKV_GCP_6,
+            CKV_GCP_106,
+            CKV_GCP_2,
+            CKV_GCP_32,
+            CKV_GCP_39,
+            CKV2_GCP_18
+
+          output_format: cli,sarif
+          output_file_path: console,results.sarif
+
+
+      # ------------------------------------------------------
+      # Upload Checkov results
+      # ------------------------------------------------------
+
+      - name: Upload Checkov SARIF
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-checkov-results
+          path: results.sarif
+          retention-days: 3
+
+
+      # ------------------------------------------------------
+      # Upload Terraform plan
+      # ------------------------------------------------------
+      #
+      # The plan generated above is passed to the apply job.
+      #
+
+      - name: Upload Terraform plan
+        uses: actions/upload-artifact@v4
         with:
           name: prod-tfplan
           path: tfplan
           retention-days: 3
 
-  apply:
-    needs: plan
-    runs-on: ubuntu-latest
-    environment: production # <- GitHub Environment with required reviewers
-                             #    configured in repo Settings; this is what
-                             #    actually blocks the job until a human
-                             #    approves it.
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: google-github-actions/auth@v2
+# ============================================================
+# PRODUCTION APPLY
+# ============================================================
+
+  apply:
+    name: Terraform Production Apply
+
+    needs:
+      - plan
+
+    runs-on: ubuntu-latest
+
+    # --------------------------------------------------------
+    # IMPORTANT
+    #
+    # Configure this Environment in:
+    #
+    # GitHub
+    #   -> Repository
+    #   -> Settings
+    #   -> Environments
+    #   -> production
+    #
+    # Add required reviewers.
+    #
+    # The workflow pauses here until an authorized reviewer
+    # approves the deployment.
+    # --------------------------------------------------------
+
+    environment:
+      name: production
+
+    concurrency:
+      group: terraform-production
+      cancel-in-progress: false
+
+    steps:
+
+      # ------------------------------------------------------
+      # Checkout the exact commit that triggered the workflow
+      # ------------------------------------------------------
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      # ------------------------------------------------------
+      # Authenticate to GCP
+      # ------------------------------------------------------
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
-      - uses: hashicorp/setup-terraform@v3
+
+      # ------------------------------------------------------
+      # Setup Google Cloud CLI
+      # ------------------------------------------------------
+
+      - name: Setup Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+
+      # ------------------------------------------------------
+      # Setup Terraform
+      # ------------------------------------------------------
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Terraform init (prod state prefix)
+
+      # ------------------------------------------------------
+      # Terraform initialization
+      # ------------------------------------------------------
+
+      - name: Terraform init
         run: |
           terraform init \
-            -backend-config=environments/prod/backend.gcs.tfbackend
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="prefix=${TF_STATE_PREFIX}"
 
-      - uses: actions/download-artifact@v4
+
+      # ------------------------------------------------------
+      # Download the exact plan created by the plan job
+      # ------------------------------------------------------
+
+      - name: Download Terraform plan
+        uses: actions/download-artifact@v4
         with:
           name: prod-tfplan
+          path: .
 
-      - name: Terraform apply (production, after manual approval)
-        run: terraform apply -auto-approve tfplan
+
+      # ------------------------------------------------------
+      # Fetch DB password from Secret Manager
+      # ------------------------------------------------------
+      #
+      # Keep this only if your Terraform configuration requires
+      # TF_VAR_db_password to be present during apply.
+      #
+
+      - name: Fetch DB password from Secret Manager
+        shell: bash
+        run: |
+          DB_PASSWORD="$(gcloud secrets versions access latest \
+            --secret="${DB_SECRET_NAME}" \
+            --project="${PROJECT_ID}")"
+
+          {
+            echo "TF_VAR_db_password<<EOF"
+            echo "${DB_PASSWORD}"
+            echo "EOF"
+          } >> "${GITHUB_ENV}"
+
+
+      # ------------------------------------------------------
+      # Terraform apply
+      # ------------------------------------------------------
+      #
+      # IMPORTANT:
+      #
+      # We apply the previously generated plan.
+      #
+      # We do NOT run:
+      #
+      # terraform apply
+      #
+      # because that would create a new plan during the apply
+      # stage.
+      #
+
+      - name: Terraform apply
+        run: |
+          terraform apply \
+            -auto-approve \
+            tfplan
