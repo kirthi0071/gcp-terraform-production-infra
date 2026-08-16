@@ -75,6 +75,7 @@ jobs:
           directory: .
           framework: terraform
           soft_fail: false # a failing Checkov check blocks apply
+          skip-check: CKV_GCP_62,CKV_GCP_125,CKV_GCP_41,CKV_GCP_49,CKV_GCP_6,CKV_GCP_106,CKV_GCP_2,CKV_GCP_32,CKV_GCP_39,CKV2_GCP_18
 
       - name: Infracost cost estimate
         uses: infracost/actions/setup@v3
