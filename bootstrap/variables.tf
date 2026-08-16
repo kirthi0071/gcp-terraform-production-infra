@@ -21,5 +21,5 @@ variable "github_repo" {
 
 variable "github_service_account_id" {
   type    = string
-  default = "github-actions-tf"
+  default = "github-actions-tf-v2"
 }
