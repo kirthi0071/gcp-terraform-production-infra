@@ -96,10 +96,12 @@ resource "google_compute_region_instance_group_manager" "app" {
     port = var.app_port
   }
 
+  distribution_policy_zones = var.zones
+
   update_policy {
     type                  = "PROACTIVE"
     minimal_action        = "REPLACE"
-    max_surge_fixed       = length(var.zones)
+    max_surge_fixed       = max(length(var.zones), 3)
     max_unavailable_fixed = 0
   }
 }
