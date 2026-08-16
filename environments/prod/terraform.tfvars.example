@@ -1,7 +1,7 @@
 environment       = "prod"
 project_id        = "testing-project-499604"
 region            = "asia-south1"
-zone              = "asia-south1-a"
+zones             = ["asia-south1-a", "asia-south1-b"]
 machine_type      = "e2-medium"
 ssh_source_ranges = ["203.0.113.0/24"] # replace with your real bastion/VPN CIDR
 
