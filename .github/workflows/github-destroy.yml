@@ -1,0 +1,81 @@
+# .github/workflows/terraform-destroy.yml
+#
+# Dedicated infrastructure destruction workflow.
+# Trigger manually from GitHub Actions UI or push to destroy-infra branch.
+
+name: Terraform Destroy Infrastructure
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+    - destroy-infra
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_VERSION: "1.15.5"
+  PROJECT_ID: "testing-project-499604"
+  REGION: "asia-south1"
+  TF_ENVIRONMENT: "prod"
+  TF_STATE_BUCKET: "testing-project-499604-tf-state"
+  TF_STATE_PREFIX: "prod"
+  DB_SECRET_NAME: "db-password"
+
+jobs:
+  destroy:
+    name: Terraform Destroy Infrastructure
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: terraform-production
+      cancel-in-progress: false
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Authenticate to Google Cloud
+      id: auth
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+        service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+    - name: Setup Google Cloud CLI
+      uses: google-github-actions/setup-gcloud@v2
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v4
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Terraform init
+      run: |
+        terraform init \
+          -backend-config="bucket=${TF_STATE_BUCKET}" \
+          -backend-config="prefix=${TF_STATE_PREFIX}"
+
+    - name: Fetch DB password from Secret Manager
+      shell: bash
+      run: |
+        DB_PASSWORD="$(gcloud secrets versions access latest \
+          --secret="${DB_SECRET_NAME}" \
+          --project="${PROJECT_ID}")"
+
+        {
+          echo "TF_VAR_db_password<<EOF"
+          echo "${DB_PASSWORD}"
+          echo "EOF"
+        } >> "${GITHUB_ENV}"
+
+    - name: Terraform Destroy
+      run: |
+        terraform destroy \
+          -auto-approve \
+          -var="project_id=${PROJECT_ID}" \
+          -var="region=${REGION}" \
+          -var="environment=${TF_ENVIRONMENT}" \
+          -var-file="environments/prod/terraform.tfvars.example"
