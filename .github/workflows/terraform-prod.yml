@@ -231,7 +231,7 @@ jobs:
 
 
       # ------------------------------------------------------
-      # Upload Checkov SARIF
+      # Upload Checkov results
       # ------------------------------------------------------
 
       - name: Upload Checkov SARIF
