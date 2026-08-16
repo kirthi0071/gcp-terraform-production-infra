@@ -1,0 +1,35 @@
+# Terraform local state / cache -- we use a remote GCS backend, but these
+# can appear locally during development and must never be committed.
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# tfvars files almost always contain environment-specific, sometimes
+# sensitive values. Only *.tfvars.example files (committed on purpose) are
+# safe.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# Never commit a service-account key file, if one is ever accidentally
+# generated locally.
+*.json
+!package*.json
+!**/policy/*.json
+
+# CLI/plan artifacts
+*.tfplan
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+.terraformrc
+terraform.rc
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/

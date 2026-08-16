@@ -1,0 +1,10 @@
+environment       = "prod"
+project_id        = "testing-project-499604"
+region            = "asia-south1"
+zone              = "asia-south1-a"
+machine_type      = "e2-medium"
+ssh_source_ranges = ["203.0.113.0/24"] # replace with your real bastion/VPN CIDR
+
+db_tier                = "db-custom-2-7680"
+db_disk_size_gb         = 50
+db_deletion_protection = true # must stay true in prod

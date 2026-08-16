@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars for LOCAL development only (terraform.tfvars is
+# gitignored). In CI, these values are supplied via -backend-config /
+# -var / -var-file per environment instead -- see environments/qa and
+# environments/prod, and the GitHub Actions workflows.
+
+project_id  = "testing-project-499604"
+region      = "asia-south1"
+zone        = "asia-south1-a"
+environment = "qa"
+
+# Replace with YOUR actual trusted range (office/VPN/bastion). Never 0.0.0.0/0.
+ssh_source_ranges = ["203.0.113.0/24"]
+
+machine_type = "e2-small"
+
+# db_password is intentionally NOT set here. Export it instead:
+#   export TF_VAR_db_password="$(gcloud secrets versions access latest --secret=db-password)"

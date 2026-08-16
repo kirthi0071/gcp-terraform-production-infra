@@ -1,0 +1,105 @@
+# .github/workflows/terraform-prod.yml
+#
+# Runs ONLY on pushes to main (i.e. after a PR has already gone through the
+# QA workflow, been reviewed, and merged). Plans automatically; apply is
+# gated behind a GitHub Environment ("production") which you configure with
+# required reviewers in repo Settings -> Environments -- that's what turns
+# "manual approval" into an actual enforced gate rather than a suggestion.
+
+name: Terraform Production
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_VERSION: "1.15.8"
+  PROJECT_ID: "testing-project-499604"
+  REGION: "asia-south1"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      plan-exitcode: ${{ steps.plan.outputs.exitcode }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - run: terraform fmt -check -recursive
+
+      - name: Terraform init (prod state prefix)
+        run: |
+          terraform init \
+            -backend-config=environments/prod/backend.gcs.tfbackend
+
+      - run: terraform validate
+
+      - name: Fetch DB password from Secret Manager
+        run: |
+          echo "TF_VAR_db_password=$(gcloud secrets versions access latest --secret=db-password --project=${{ env.PROJECT_ID }})" >> "$GITHUB_ENV"
+
+      - name: Terraform plan
+        id: plan
+        run: |
+          terraform plan \
+            -var="project_id=${{ env.PROJECT_ID }}" \
+            -var="region=${{ env.REGION }}" \
+            -var-file="environments/prod/terraform.tfvars.example" \
+            -out=tfplan
+
+      - name: Checkov static security scan
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          framework: terraform
+          soft_fail: false
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prod-tfplan
+          path: tfplan
+          retention-days: 3
+
+  apply:
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: production # <- GitHub Environment with required reviewers
+                             #    configured in repo Settings; this is what
+                             #    actually blocks the job until a human
+                             #    approves it.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform init (prod state prefix)
+        run: |
+          terraform init \
+            -backend-config=environments/prod/backend.gcs.tfbackend
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: prod-tfplan
+
+      - name: Terraform apply (production, after manual approval)
+        run: terraform apply -auto-approve tfplan

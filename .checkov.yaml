@@ -1,0 +1,32 @@
+# Checkov configuration.
+#
+# WHAT CHECKOV DOES: it statically parses your Terraform source (no cloud
+# credentials needed, no plan required) and evaluates it against hundreds of
+# built-in security/compliance rules -- e.g. "is this firewall rule open to
+# 0.0.0.0/0 on a sensitive port", "is this storage bucket public", "is this
+# SQL instance missing encryption/backup config". Because it only needs the
+# source code, it can run on every PR in seconds, long before anything is
+# ever applied to real infrastructure.
+#
+# WHY IT RUNS BEFORE terraform apply (and even before/alongside plan):
+# The whole point is to catch a misconfiguration -- like someone widening
+# the SSH firewall rule to 0.0.0.0/0 -- while it's still a code review
+# comment, not a live production hole. Gating `apply` behind a required,
+# passing Checkov job turns "please don't do that" into "the pipeline
+# physically won't let that merge".
+
+framework:
+  - terraform
+
+directory:
+  - .
+
+# Keep this list SHORT and each skip justified with a comment. Skipping
+# checks silently is how security debt accumulates.
+skip-check:
+  # CKV_GCP_* IDs would go here with a comment explaining exactly why, e.g.:
+  # - "CKV_GCP_XX"  # justified because ...
+  []
+
+compact: true
+quiet: false
