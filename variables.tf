@@ -15,10 +15,9 @@ variable "region" {
   default     = "asia-south1"
 }
 
-variable "zone" {
-  description = "GCP zone for zonal resources (VM). Must be inside var.region."
-  type        = string
-  default     = "asia-south1-a"
+variable "zones" {
+  description = "Zones for the regional managed instance group"
+  type        = list(string)
 }
 
 variable "environment" {

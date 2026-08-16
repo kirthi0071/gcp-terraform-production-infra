@@ -54,7 +54,7 @@ module "vm" {
   project_id            = var.project_id
   name_prefix           = local.name_prefix
   region                = var.region
-  zone                  = var.zone
+  zones                 = var.zones
   machine_type          = var.machine_type
   image                 = var.vm_image
   subnet_self_link      = module.network.subnet_self_link
