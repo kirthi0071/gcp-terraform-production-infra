@@ -34,11 +34,11 @@ module "firewall" {
   source = "./modules/firewall"
 
   project_id               = var.project_id
-  name_prefix               = local.name_prefix
-  network_id                = module.network.network_id
-  ssh_source_ranges         = var.ssh_source_ranges
+  name_prefix              = local.name_prefix
+  network_id               = module.network.network_id
+  ssh_source_ranges        = var.ssh_source_ranges
   enable_ssh_from_anywhere = var.enable_ssh_from_anywhere
-  labels                     = local.common_labels
+  labels                   = local.common_labels
 }
 
 module "service_account" {
@@ -51,15 +51,15 @@ module "service_account" {
 module "vm" {
   source = "./modules/vm"
 
-  project_id             = var.project_id
-  name_prefix            = local.name_prefix
-  region                 = var.region
-  zone                   = var.zone
-  machine_type           = var.machine_type
-  image                  = var.vm_image
-  subnet_self_link       = module.network.subnet_self_link
-  service_account_email  = module.service_account.email
-  labels                 = local.common_labels
+  project_id            = var.project_id
+  name_prefix           = local.name_prefix
+  region                = var.region
+  zone                  = var.zone
+  machine_type          = var.machine_type
+  image                 = var.vm_image
+  subnet_self_link      = module.network.subnet_self_link
+  service_account_email = module.service_account.email
+  labels                = local.common_labels
 
   depends_on = [module.firewall]
 }
@@ -67,23 +67,23 @@ module "vm" {
 module "database" {
   source = "./modules/database"
 
-  project_id           = var.project_id
-  name_prefix          = local.name_prefix
-  region               = var.region
-  network_id           = module.network.network_id
-  db_version           = var.db_version
-  tier                 = var.db_tier
-  disk_size_gb         = var.db_disk_size_gb
+  project_id          = var.project_id
+  name_prefix         = local.name_prefix
+  region              = var.region
+  network_id          = module.network.network_id
+  db_version          = var.db_version
+  tier                = var.db_tier
+  disk_size_gb        = var.db_disk_size_gb
   deletion_protection = var.db_deletion_protection
-  db_password          = var.db_password
-  labels               = local.common_labels
+  db_password         = var.db_password
+  labels              = local.common_labels
 }
 
 module "load_balancer" {
   source = "./modules/load-balancer"
 
-  project_id              = var.project_id
-  name_prefix             = local.name_prefix
-  backend_instance_group  = module.vm.instance_group
-  labels                  = local.common_labels
+  project_id             = var.project_id
+  name_prefix            = local.name_prefix
+  backend_instance_group = module.vm.instance_group
+  labels                 = local.common_labels
 }

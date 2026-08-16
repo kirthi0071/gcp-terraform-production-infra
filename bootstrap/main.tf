@@ -44,7 +44,7 @@ resource "google_storage_bucket" "tf_state" {
 resource "google_iam_workload_identity_pool" "github" {
   project                   = var.project_id
   workload_identity_pool_id = "github-actions-pool-v2"
-  display_name               = "GitHub Actions Pool"
+  display_name              = "GitHub Actions Pool"
 }
 
 resource "google_iam_workload_identity_pool_provider" "github" {
@@ -81,8 +81,8 @@ resource "google_service_account" "github_actions" {
 # the credential GitHub Actions actually uses.
 resource "google_service_account_iam_member" "wif_binding" {
   service_account_id = google_service_account.github_actions.name
-  role                = "roles/iam.workloadIdentityUser"
-  member              = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository/${var.github_repo}"
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository/${var.github_repo}"
 }
 
 # Minimum roles the CI service account needs to plan/apply this project.
